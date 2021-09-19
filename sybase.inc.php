@@ -44,14 +44,9 @@ if (isset($_GET["sybase"])) {
 
 			function query($query, $unbuffered = false) {
 				$query = preg_replace("/;+\s*$/D", '', $query);
-				$as = null;
-				//if (preg_match("~^(SELECT\s+(?:TOP\s+\d+\s+(?:/\* offset:\d+ \*/\s+)?)?\*,)(.*?)(FROM.+)$~s",
-				//			   $query, $matches)) {
-				//	if (preg_match_all("/\sAS\s+([^\s,]+)/s", $matches[2], $matches2, PREG_PATTERN_ORDER)) {
-				//		$as = $matches2[1];
-				//		$query = $matches[1] . preg_replace("/\sAS\s+([^\s,]+)/s", " AS _as_$1 ", $matches[2]) . $matches[3];
-				//	}
-				//}
+				if (preg_match("/^.+--isql-go-command.*$/m", $query)) {
+					$query = preg_replace("/^.+--isql-go-command.*$/m", '', $query);
+				}
 				if ($unbuffered) {
 					$result = @sybase_unbuffered_query($query, $this->_link);
 				} else {
@@ -66,7 +61,12 @@ if (isset($_GET["sybase"])) {
 					$this->affected_rows = sybase_affected_rows($this->_link);
 					return true;
 				}
-				return new Min_Result($result, $query, $as);
+
+				if (preg_match('~/\* offset:(\d+) \*/~', $query, $matches)) {
+					sybase_data_seek($result, $matches[1]);
+				}
+
+				return new Min_Result($result);
 			}
 
 			function multi_query($query) {
@@ -91,39 +91,15 @@ if (isset($_GET["sybase"])) {
 		}
 
 		class Min_Result {
-			var $_result, $_query, $_offset = 0, $_fields, $num_rows;
+			var $_result, $_offset = 0, $_fields, $num_rows;
 
-			function __construct($result, $query, $as=null) {
+			function __construct($result) {
 				$this->_result = $result;
-				$this->_query = $query;
-				if (preg_match('~/\* offset:(\d+) \*/~', $query, $matches)) {
-					$this->_offset = $matches[1];
-					$this->seek($this->_offset);
-				}
-				$this->_as = $as;
 				$this->num_rows = sybase_num_rows($result);
 			}
 
 			function fetch_assoc() {
-				if ($this->_as) {
-					$row = sybase_fetch_assoc($this->_result);
-					if (!is_array($row)) {
-						return $row;
-					}
-					$return = array();
-					foreach ($row as $key => $val) {
-						$_as_ = substr($key, 0, 4);
-						$key_org = substr($key, 4);
-						if ($_as_ == '_as_' && in_array($key_org, $this->_as)) {
-							$return[$key_org] = $val;
-						} else {
-							$return[$key] = $val;
-						}
-					}
-					return $return;
-				} else {
-					return sybase_fetch_assoc($this->_result);
-				}
+				return sybase_fetch_assoc($this->_result);
 			}
 
 			function fetch_row() {
@@ -153,15 +129,67 @@ if (isset($_GET["sybase"])) {
 	} elseif (extension_loaded("pdo_dblib")) {
 		class Min_DB extends Min_PDO {
 			var $extension = "PDO_DBLIB";
+		
+			function __construct() {
+				$adminer = adminer();
+				foreach ($adminer->plugins as $plugin) {
+					if (get_class($plugin) == 'AdminerSybaseDriver') {
+						return;
+					}
+				}
+				adminer()->plugins[] = new AdminerSybaseDriver();
+
+				return parent::__construct();
+			}
 
 			function connect($server, $username, $password) {
-				$this->dsn("dblib:charset=utf8;host=" . str_replace(":", ";unix_socket=", preg_replace('~:(\d)~', ';port=\1', $server)), $username, $password);
+				$this->dsn("sybase:charset=utf8;host=" . str_replace(":", ";unix_socket=", preg_replace('~:(\d)~', ';port=\1', $server)), $username, $password);
 				return true;
 			}
 
+			function dsn($dsn, $username, $password, $options = array()) {
+				$options[PDO::ATTR_ERRMODE] = PDO::ERRMODE_SILENT;
+				$options[PDO::ATTR_STATEMENT_CLASS] = array('Min_PDOStatement');
+				try {
+					$this->pdo = new PDO($dsn, $username, $password, $options);
+				} catch (Exception $ex) {
+					$message = $ex->getMessage();
+					if ($message != "could not find driver") {
+						auth_error(h($message));
+					}
+					try {
+						list($driver, $dsn) = explode(":", $dsn, 2);
+						$this->pdo = new PDO("dblib:$dsn", $username, $password, $options);
+					} catch (Exception $ex) {
+						auth_error(h($ex->getMessage()));
+					}
+				}
+
+				$result = $this->query("SELECT @@VERSION");
+				if ($result) {
+					$row = $result->fetch_row();
+					$this->server_info = $row[0];
+				}
+			}
+
 			function select_db($database) {
-				// database selection is separated from the connection so dbname in DSN can't be used
 				return $this->query("USE " . idf_escape($database));
+			}
+
+
+			function query($query, $unbuffered = false) {
+				$query = preg_replace("/;+\s*$/D", '', $query);
+				if (preg_match("/^.+--isql-go-command.*$/m", $query)) {
+					$query = preg_replace("/^.+--isql-go-command.*$/m", '', $query);
+				}
+				$result = parent::query($query, $unbuffered);
+				if ($result && preg_match('~/\* offset:(\d+) \*/~', $query, $matches)) {
+					for ($i = 0; $i < $matches[1]; $i++) {
+						$result->fetch(PDO::FETCH_NUM);
+					}
+				}
+
+				return $result;
 			}
 		}
 	}
@@ -285,11 +313,8 @@ if (isset($_GET["sybase"])) {
 		function begin() {
 			return queries("BEGIN TRANSACTION");
 		}
-
 	}
 
-	global $sybase_cache;
-	$sybase_cache = array();
 
 	function idf_escape($idf) {
 		return "[" . str_replace("]", "]]", $idf) . "]";
@@ -355,9 +380,9 @@ if (isset($_GET["sybase"])) {
 	}
 
 	function tables_list() {
-		global $sybase_cache;
-		if (!array_key_exists('table_list', $sybase_cache)) {
-			$sybase_cache['table_list'] = get_key_vals("
+		static $cache = null;
+		if (is_null($sybase)) {
+			$cache = get_key_vals("
 SELECT name,
   CASE type
   WHEN 'U' THEN 'USER_TABLE'
@@ -368,7 +393,7 @@ SELECT name,
 FROM sysobjects
 WHERE type IN ('U', 'V') ORDER BY name");
 		}
-		return $sybase_cache['table_list'];
+		return $cache;
 	}
 
 	function count_tables($databases) {
@@ -382,11 +407,8 @@ WHERE type IN ('U', 'V') ORDER BY name");
 	}
 
 	function table_status($name = "") {
-		global $sybase_cache;
-		if (!array_key_exists('table_status', $sybase_cache)) {
-			$sybase_cache['table_status'] = array();
-		}
-		if (!array_key_exists($name, $sybase_cache['table_status'])) {
+		static $cache = array();
+		if (!array_key_exists($name, $cache)) {
 			foreach (get_rows("
 SELECT
   so.name AS Name,
@@ -399,15 +421,16 @@ SELECT
   sts.rowcnt AS 'Rows',
   sts.rowcnt * sts.datarowsize AS Data_length
 FROM sysobjects AS so
-JOIN systabstats AS sts ON sts.id = so.id
+LEFT OUTER JOIN systabstats AS sts ON sts.id = so.id
 WHERE so.type IN ('U', 'V') " . ($name != "" ? "AND so.name = " . q($name) : "ORDER BY so.name")) as $row) {
-				$sybase_cahce['table_status'][$row["Name"]] = $row;
+				$cache[$row["Name"]] = $row;
+				ksort($cache);
 			}
 		}
 		if ($name != "") {
-			return $sybase_cahce['table_status'][$name];
+			return $cache[$name];
 		} else {
-			return $sybase_cahce['table_status'];
+			return $cache;
 		}
 	}
 
@@ -420,35 +443,31 @@ WHERE so.type IN ('U', 'V') " . ($name != "" ? "AND so.name = " . q($name) : "OR
 	}
 
 	function pkeys($table) {
-		global $sybase_cache;
-		if (!array_key_exists('pkeys', $sybase_cache)) {
-			$sybase_cache['pkeys'] = array();
-		}
-		if (!array_key_exists($table, $sybase_cache['pkeys'])) {
+		static $cache = array();
+		if (!array_key_exists($table, $cache)) {
+			$cache[$table] = array();
 			$pkeys = get_vals("EXECUTE sp_pkeys " . table($table), 3);
-			$sybase_cache['pkeys'][$table] = array();
 			if ($pkeys) {
-				$sybase_cache['pkeys'][$table] = $pkeys;
+				$cache[$table] = $pkeys;
 			} else {
 				foreach (indexes($table) as $name => $index) {
 					if (preg_match('/UNIQUE|PRIMARY/i', $index['type'])) {
-						$sybase_cache['pkeys'][$table] = $index["columns"];
+						$cache[$table] = $index["columns"];
 						break;
 					}
 				}
 			}
 		}
-		return $sybase_cache['pkeys'][$table];
+		return $cache[$table];
 	}
 
 	function fields($table) {
-		global $sybase_cache;
-		if (!array_key_exists('fields', $sybase_cache)) {
-			$sybase_cache['fields'] = array();
-		}
-		if (!array_key_exists($table, $sybase_cache['fields'])) {
+		static $cache = array();
+		if (!array_key_exists($table, $cache)) {
 			$return = array();
 			$pkeys = pkeys($table);
+			$connection = connection();
+			$ncharsize = $connection->result("SELECT @@ncharsize");
 			foreach (get_rows("
 SELECT
   c.name,
@@ -461,9 +480,8 @@ SELECT
   CASE (c.status & 128) WHEN 128 THEN 1 ELSE 0 END AS 'identity'
 FROM syscolumns AS c
 JOIN systypes AS t ON c.usertype = t.usertype
-JOIN sysobjects AS o ON o.id = c.id
 LEFT OUTER JOIN syscomments AS cm on cm.id = c.cdefault
-WHERE o.name='$table'
+WHERE c.id = object_id('$table')
 ORDER by c.colid") as $row) {
 				if (preg_match('/^u(.*int)$/', $row["type"], $matches)) {
 					$type = $matches[1];
@@ -473,14 +491,18 @@ ORDER by c.colid") as $row) {
 					$unsigned = "";
 				}
 				if (preg_match("~char|binary~", $type)) {
-					$length = $row["length"];
+					if ($column["type"] == "nchar" || $column["type"] == "nvarchar") {
+						$length = $row["length"] / $ncharsize;
+					} else {
+						$length = $row["length"];
+					}
 				} elseif (preg_match("/^numeric|^decimal/", $type)) {
 					$length = "$row[prec],$row[scale]";
 				} else {
 					$length = "";
 				}
 				$return[$row["name"]] = array("field" => $row["name"],
-											  "full_type" => $type . ($unsigned ? " unsigned " : "") . ($length ? "($length)" : ""),
+											  "full_type" => $type . ($unsigned ? " UNSIGNED " : "") . ($length ? "($length)" : ""),
 											  "type" => $type,
 											  "unsigned" => $unsigned,
 											  "length" => $length,
@@ -492,17 +514,14 @@ ORDER by c.colid") as $row) {
 											  "comment" => null,
 											  );
 			}
-			$sybase_cache['fields'][$table] = $return;
+			$cache[$table] = $return;
 		}
-		return $sybase_cache['fields'][$table];
+		return $cache[$table];
 	}
 
 	function indexes($table, $connection2 = null) {
-		global $sybase_cache;
-		if (!array_key_exists('indexes', $sybase_cache)) {
-			$sybase_cache['indexes'] = array();
-		}
-		if (!array_key_exists($table, $sybase_cache['indexes']) || $connection2) {
+		static $cache = array();
+		if (!array_key_exists($table, $cache) || $connection2) {
 			$return = array();
 			$primary = false;
 			foreach (get_rows("
@@ -528,8 +547,6 @@ ORDER BY i.indid") as $row) {
 					$type = "UNIQUE";
 				} elseif ($row["status"] & 2) { // unique
 					$type = "UNIQUE";
-					//} elseif (($row["status"] & 16) || ($row["status2"] & 512)) { // clustered
-					//	$type = "PRIMARY";
 				} else {
 					$type = "INDEX";
 				}
@@ -544,6 +561,7 @@ ORDER BY i.indid") as $row) {
 					$return[$name]["columns"][] = $row2[0]["col"];
 					//$return[$name]["descs"][] = ($row2[0]["colorder"] == "DESC");
 					$return[$name]["descs"][] = null; // bug
+					$return[$name]["colorder"][] = $row2[0]["colorder"]; // Sybase only
 				}
 				// Sybase only
 				$return[$name]["status"] = $row["status"];
@@ -552,16 +570,27 @@ ORDER BY i.indid") as $row) {
 			if ($connection2) {
 				return $return;
 			}
-			$sybase_cache['indexes'][$table] = $return;
+			$cache[$table] = $return;
 		}
-		return $sybase_cache['indexes'][$table];
+		return $cache[$table];
 	}
 
 	function view($name) {
 		$connection = connection();
-		return array(
-					 "select" => trim($connection->result("
-SELECT text FROM syscomments WHERE id IN (SELECT id FROM sysobjects WHERE name = ". q($name) .") ORDER BY colid2, colid")));
+		$sql = "";
+		foreach (get_vals("
+SELECT text
+FROM syscomments
+WHERE id IN (
+  SELECT id
+  FROM sysobjects
+  WHERE name = ". q($name) .")
+ORDER BY colid2, colid") as $line) {
+			if (!preg_match("~^\s*/\*.*\*/[\s/]*$~", $line)) {
+				$sql .= $line . "\n";
+			}
+		}
+		return array("select" => $sql);
 	}
 
 	function collations() {
@@ -637,7 +666,6 @@ SELECT text FROM syscomments WHERE id IN (SELECT id FROM sysobjects WHERE name =
 					$alter["ADD"][] = implode("", $val);
 				} else {
 					$val[2] = "";
-					//unset($val[6]); //! identity can't be removed
 					if ($column != $val[0]) {
 						queries("EXECUTE sp_rename " . q(table($table) . ".$column") . ", " . q(idf_unescape($val[0])) . ", 'column'");
 						$val_org = $fields_org[$column];
@@ -659,11 +687,6 @@ SELECT text FROM syscomments WHERE id IN (SELECT id FROM sysobjects WHERE name =
 		if ($table != $name) {
 			queries("EXECUTE sp_rename " . q(table($table)) . ", " . q($name));
 		}
-		/*
-		if ($foreign) {
-			$alter[""] = $foreign;
-		}
-		*/
 		foreach ($alter as $key => $val) {
 			if (!queries("ALTER TABLE " . idf_escape($name) . " $key " . implode(",", $val))) {
 				return false;
@@ -734,11 +757,8 @@ SELECT text FROM syscomments WHERE id IN (SELECT id FROM sysobjects WHERE name =
 	}
 
 	function foreign_keys($table) {
-		global $sybase_cache;
-		if (!array_key_exists('foreign_keys', $sybase_cache)) {
-			$sybase_cache['foreign_keys'] = array();
-		}
-		if (!array_key_exists($table, $sybase_cache['foreign_keys'])) {
+		static $cache = array();
+		if (!array_key_exists($table, $cache)) {
 			$return = array();
 			$sql = "
 SELECT 
@@ -768,7 +788,7 @@ LEFT JOIN syscolumns AS pk{$i} ON ref.refkey{$i} = pk{$i}.colid AND ref.reftabid
 				//$foreign_key["db"] = $row["fktable_qualifier"];
 				$foreign_key["table"] = $row["pktable_name"];
 				for ($i = 1; $i <= 16; $i++) {
-					if (is_null($row["fk{$i}_name"])) break;
+					if (is_null($row["fk{$i}_name"]) || $row["fk{$i}_name"] === "") break;
 					$foreign_key["source"][] = $row["fk{$i}_name"];
 					$foreign_key["target"][] = $row["pk{$i}_name"];
 				}
@@ -777,9 +797,9 @@ LEFT JOIN syscolumns AS pk{$i} ON ref.refkey{$i} = pk{$i}.colid AND ref.reftabid
 				$name = $row["fk_name"];
 				$return[$name] = $foreign_key;
 			}
-			$sybase_cache['foreign_keys'][$table] = $return;
+			$cache[$table] = $return;
 		}
-		return $sybase_cache['foreign_keys'][$table];
+		return $cache[$table];
 	}
 
 	function truncate_tables($tables) {
@@ -799,20 +819,14 @@ LEFT JOIN syscolumns AS pk{$i} ON ref.refkey{$i} = pk{$i}.colid AND ref.reftabid
 		return false;
 	}
 
-	/** Get information about trigger
-	 * @param string trigger name
-	 * @return array array("Trigger" => , "Timing" => , "Event" => , "Of" => , "Type" => , "Statement" => )
-	 */
 	function trigger($name) {
+		static $cache = array();
+
 		if ($name == "") {
 			return array();
 		}
 
-		global $sybase_cache;
-		if (!array_key_exists('trigger', $sybase_cache)) {
-			$sybase_cache['trigger'] = array();
-		}
-		if (!array_key_exists($table, $sybase_cache['trigger'])) {
+		if (!array_key_exists($name, $cache)) {
 			$return = array("Trigger" => $name,
 							"Timing" => "FOR",
 							"Event" => "",
@@ -863,17 +877,11 @@ ORDER BY colid2, colid") as $row) {
 			}
 			$return["Statement"] = preg_replace("/create\s*trigger.*?\sas\s/is", "", $return["Statement"]);
 
-			$sybase_cache['trigger'][$table] = $return;
+			$cache[$name] = $return;
 		}
-		return $sybase_cache['trigger'][$table];
+		return $cache[$name];
 	}
 
-	/** Copy tables to other schema
-	* @param array
-	* @param array
-	* @param string
-	* @return bool
-	*/
 	function copy_tables($tables, $views, $target) {
 		if (DB != $target) {
 			connection()->error = "Cannot copy tables between difference databases";
@@ -895,11 +903,8 @@ ORDER BY colid2, colid") as $row) {
 	}
 
 	function triggers($table) {
-		global $sybase_cache;
-		if (!array_key_exists('triggers', $sybase_cache)) {
-			$sybase_cache['triggers'] = array();
-		}
-		if (!array_key_exists($table, $sybase_cache['triggers'])) {
+		static $cache = array();
+		if (!array_key_exists($table, $cache)) {
 			$return = array();
 			foreach (get_rows("
 SELECT
@@ -911,17 +916,17 @@ LEFT OUTER JOIN sysobjects AS instrig ON instrig.id = tab.instrig
 LEFT OUTER JOIN sysobjects AS updtrig ON updtrig.id = tab.updtrig
 LEFT OUTER JOIN sysobjects AS deltrig ON deltrig.id = tab.deltrig
 WHERE tab.name = " . q($table)) as $row) {
-				if (!is_null($row["instrig_name"])) {
+				if ($row["instrig_name"]) {
 					$return[$row["instrig_name"]] = array('INSERT', 'ON');
 				}
-				if (!is_null($row["updtrig_name"])) {
+				if ($row["updtrig_name"]) {
 					if (array_key_exists($row["updtrig_name"], $return)) {
 						$return[$row["updtrig_name"]][0] .= ',UPDATE';
 					} else {
 						$return[$row["updtrig_name"]] = array('UPDATE', 'ON');
 					}
 				}
-				if (!is_null($row["deltrig_name"])) {
+				if ($row["deltrig_name"]) {
 					if (array_key_exists($row["deltrig_name"], $return)) {
 						$return[$row["deltrig_name"]][0] .= ',DELETE';
 					} else {
@@ -929,9 +934,9 @@ WHERE tab.name = " . q($table)) as $row) {
 					}
 				}
 			}
-			$sybase_cache['triggers'][$table] = $return;
+			$cache[$table] = $return;
 		}
-		return $sybase_cache['triggers'][$table];
+		return $cache[$table];
 	}
 
 	function trigger_options() {
@@ -960,10 +965,88 @@ WHERE tab.name = " . q($table)) as $row) {
 		return false;
 	}
 
-	// TODO
 	function create_sql($table, $auto_increment, $style) {
-		// Create table DDL
-		return "";
+		$connection = connection();
+		
+		$ddl = "CREATE TABLE $table (\n";
+		$fields = fields($table);
+		$i = 0;
+		foreach ($fields as $name => $field) {
+			$i++;
+			$ddl .= $field["field"];
+			if ($field["unsigned"]) {
+				$ddl .= " UNSIGNED";
+			}
+			$ddl .= " {$field['full_type']}";
+			if ($field["default"]) {
+				$ddl .= " DEFAULT {$field['default']}";
+			}
+			if ($field["auto_increment"]) {
+				$ddl .= " IDENTITY";
+			} else if ($field["null"]) {
+				$ddl .= " NULL";
+			} else {
+				$ddl .= " NOT NULL";
+			}
+			$ddl .= $sql . ($i == count($fields) ? "\n" : ",\n");
+		}
+		$ddl .= ")\n";
+		$ddl .= "GO --isql-go-command\n\n";
+
+		// Indexes
+		$indexes = indexes($table);
+		foreach ($indexes as $name => $index) {
+			if ($index['status2'] & 2) { // constraint
+				$ddl .= "ALTER TABLE " . table($table) . " ADD";
+				if (($index['status2'] & 8) == 0) {
+					$ddl .= " CONSTRAINT $name";
+				}
+				if ($index['status'] & 2048) { // primary key
+					$ddl .= " PRIMARY KEY";
+				} else if ($index['status'] & 2) { // unique
+					$ddl .= " UNIQUE";
+				}
+				if ($index['status'] & 16) { // clusted
+					$ddl .= " CLUSTERED";
+				}
+			} else {
+				$ddl .= "CREATE";
+				if ($index['status'] & 2) { // unique
+					$ddl .= " UNIQUE";
+				}
+				if ($index['status'] & 16) { // clusted
+					$ddl .= " CLUSTERED";
+				}
+				$ddl .= " INDEX";
+				if (($index['status2'] & 8) == 0) {
+					$ddl .= " $name";
+				}
+				$ddl .= " ON $table";
+			}
+			$i = 0;
+			$cols = array();
+			foreach ($index["columns"] as $column) {
+				if ($index["colorder"][$i]) {
+					$cols[] = "$column " . $index["colorder"][$i];
+				} else {
+					$cols[] = $column;
+				}
+			}
+			$ddl .= " (" . implode(", ", $cols) . ")\n";
+			$ddl .= "GO --isql-go-command\n\n";
+		}
+
+		// Foreign keys
+		$fkeys = foreign_keys($table);
+		foreach ($fkeys as $name => $fkey) {
+			$ddl .= "ALTER TABLE " . table($table) . " ADD FOREIGN KEY";
+			$ddl .= " (" . implode(", ", $fkey["source"]) .")";
+			$ddl .= " REFERENCES " . $fkey["table"];
+			$ddl .= " (" . implode(", ", $fkey["target"]) .")\n";
+			$ddl .= "GO --isql-go-command\n\n";
+		}
+
+		return $ddl;
 	}
 
 	function truncate_sql($table) {
@@ -974,11 +1057,24 @@ WHERE tab.name = " . q($table)) as $row) {
 		return "USE " . idf_escape($database);
 	}
 
-	// TODO
 	function trigger_sql($table) {
-		$return = "";
-		// trigger DDL
-		return $return;
+		$sql = "";
+		foreach (triggers($table) as $trigger => $define) {
+			foreach (get_vals("
+SELECT text
+FROM syscomments
+WHERE id IN (
+  SELECT id
+  FROM sysobjects
+  WHERE name = ". q($trigger) .")
+ORDER BY colid2, colid") as $line) {
+				if (!preg_match("~^\s*/\*.*\*/[\s/]*$~", $line)) {
+					$sql .= $line . "\n";
+				}
+			}
+			$sql .= "GO --isql-go-command\n\n";
+		}
+		return $sql;
 	}
 
 	function show_variables() {
@@ -1216,9 +1312,22 @@ WHERE tab.name = " . q($table)) as $row) {
 		return $connection->result("SELECT @@max_connections");
 	}
 
+
+	function routines() {
+		return array('abc', 'cde');
+	}
+
+	function routine_languages() {
+		return array();
+	}
+
+	function routine_id($name, $row) {
+		return idf_escape($name);
+	}
+
 	function support($feature) {
 		$support = array(//"comment",
-						 "column",
+						 "columns",
 						 "copy",
 						 "database",
 						 "descidx",
@@ -1284,7 +1393,7 @@ WHERE tab.name = " . q($table)) as $row) {
 		}
 		return array(
 			'possible_drivers' => array("SYBASE", "PDO_DBLIB"),
-			'jush' => "sybase",
+			'jush' => isset($_GET["trigger"]) ? "mssql" : "sybase",
 			'types' => $types,
 			'structured_types' => $structured_types,
 			'unsigned' => array('unsigned'),
@@ -1303,12 +1412,6 @@ WHERE tab.name = " . q($table)) as $row) {
 	}
 
 	class AdminerSybaseDriver {
-		/*
-		function selectQueryBuild($table, $select, $where, $group, $order, $limit, $page) {
-			return "";
-		}
-		*/
-
 		function dumpData($table, $style, $query) {
 			$connection = connection();
 			$jush = "sybase";
@@ -1366,7 +1469,7 @@ WHERE tab.name = " . q($table)) as $row) {
 								$buffer = $insert . $s;
 							}
 							*/
-							echo $insert . $s . "\n";
+							echo $insert . $s . "\nGO --isql-go-command\n";
 						}
 					}
 					if ($buffer) {
@@ -1387,10 +1490,9 @@ document.addEventListener('DOMContentLoaded', function() {
 			// remove Alter indexes link
 			if (isset($_GET["table"])) {
 ?>
-  //document.querySelector('h3#indexes + table + p.links').style.display = 'none';
-  //document.querySelectorAll('h3#foreign-keys + table tr > :nth-child(3), h3#foreign-keys + table tr > :nth-child(4)').forEach(function(elm) {
-  //  elm.style.display = 'none';
-  //});
+  document.querySelectorAll('h3#foreign-keys + table tr > :nth-child(3), h3#foreign-keys + table tr > :nth-child(4)').forEach(function(elm) {
+    elm.style.display = 'none';
+  });
 <?php
 	        } elseif (isset($_GET["foreign"])) {
 ?>
