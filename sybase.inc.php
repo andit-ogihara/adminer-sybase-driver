@@ -317,6 +317,14 @@ if (isset($_GET["sybase"])) {
 
 
 	function idf_escape($idf) {
+		if (substr($idf, 0, 1) == "@") return $idf;
+		if (strpos($idf, ".") !== false) {
+			$vals = explode(".", $idf);
+			foreach ($vals as &$val) {
+				$val = "[" . str_replace("]", "]]", $val) . "]";
+			}
+			return implode(".", $vals);
+		}
 		return "[" . str_replace("]", "]]", $idf) . "]";
 	}
 
@@ -491,13 +499,13 @@ ORDER by c.colid") as $row) {
 					$unsigned = "";
 				}
 				if (preg_match("~char|binary~", $type)) {
-					if ($column["type"] == "nchar" || $column["type"] == "nvarchar") {
+					if ($row["type"] == "nchar" || $row["type"] == "nvarchar") {
 						$length = $row["length"] / $ncharsize;
 					} else {
 						$length = $row["length"];
 					}
 				} elseif (preg_match("/^numeric|^decimal/", $type)) {
-					$length = "$row[prec],$row[scale]";
+					$length = "{$row['prec']},{$row['scale']}";
 				} else {
 					$length = "";
 				}
@@ -1215,9 +1223,6 @@ ORDER BY colid2, colid") as $line) {
 		return $return;
 	}
 
-	/** Get process list
-	 * @return array ($row)
-	 */
 	function process_list() {
 		$rows = get_rows("sp_who");
 		foreach ($rows as &$row) {
@@ -1312,9 +1317,116 @@ ORDER BY colid2, colid") as $line) {
 		return $connection->result("SELECT @@max_connections");
 	}
 
+	function routine($name, $type) {
+		$return = array('fields' => array());
+		$connection = connection();
+		$ncharsize = $connection->result("SELECT @@ncharsize");
+		$type = $type == "FUNCTION" ? "SF" : "P";
+		foreach (get_rows("
+SELECT
+  sc.name,
+  st.name AS type,
+  st.prec,
+  st.scale,
+  sc.status2
+FROM sysobjects AS so
+JOIN syscolumns AS sc ON sc.id = so.id
+JOIN systypes AS st ON st.type = sc.type
+WHERE so.type = '$type'
+  AND so.name = '$name'
+ORDER BY sc.colid") as $row) {
+			if (preg_match('/^u(.*int)$/', $row["type"], $matches)) {
+				$type = $matches[1];
+				$unsigned = "unsigned";
+			} else {
+				$type = $row["type"];
+				$unsigned = "";
+			}
+			if (preg_match("~char|binary~", $type)) {
+				if ($row["type"] == "nchar" || $row["type"] == "nvarchar") {
+					$length = $row["length"] / $ncharsize;
+				} else {
+					$length = $row["length"];
+				}
+			} elseif (preg_match("/^numeric|^decimal/", $type)) {
+				$length = "{$row['prec']},{$row['scale']}";
+			} else {
+				$length = "";
+			}
+			$full_type = $type . ($unsigned ? " UNSIGNED " : "") . ($length ? "($length)" : "");
+			$field = array("type" => $type,
+						   "length" => $length,
+						   "unsigned" => $unsigned,
+						   'full_type' => $full_type);
+
+			if ($row["name"] == "Return Type") {
+				$return["returns"] = $field;
+			} else {
+				$field["field"] = $row["name"];
+				$field["inout"] = ($row["status2"] & 2) ? "OUT" : "IN";
+				$return["fields"][] = $field;
+			}
+		}
+
+		$return["definition"] = "";
+		foreach (get_rows("
+SELECT text
+FROM syscomments
+WHERE id IN (
+  SELECT id
+  FROM sysobjects
+  WHERE name = " . q($name) . "
+)
+ORDER BY colid2, colid") as $row) {
+			$return["definition"] .= $row["text"];
+		}
+		$return["definition"] = preg_replace("/^.*?([\n\s]AS[\n\s])/si", "$1", $return["definition"]);
+
+		return $return;
+	}
 
 	function routines() {
-		return array('abc', 'cde');
+		$return = array();
+		$connection = connection();
+		$ncharsize = $connection->result("SELECT @@ncharsize");
+		foreach (get_rows("
+SELECT
+  user_name(so.uid) AS user_name,
+  so.name,
+  so.type AS routine_type,
+  st.name AS type,
+  st.prec,
+  st.scale
+FROM sysobjects AS so
+LEFT OUTER JOIN syscolumns AS sc ON sc.id = so.id AND sc.name = 'Return Type'
+LEFT OUTER JOIN systypes AS st ON st.type = sc.type
+WHERE so.type IN ('SF', 'P')
+ORDER BY so.name") as $row) {
+			if (preg_match('/^u(.*int)$/', $row["type"], $matches)) {
+				$type = $matches[1];
+				$unsigned = "unsigned";
+			} else {
+				$type = $row["type"];
+				$unsigned = "";
+			}
+			if (preg_match("~char|binary~", $type)) {
+				if ($row["type"] == "nchar" || $row["type"] == "nvarchar") {
+					$length = $row["length"] / $ncharsize;
+				} else {
+					$length = $row["length"];
+				}
+			} elseif (preg_match("/^numeric|^decimal/", $type)) {
+				$length = "{$row['prec']},{$row['scale']}";
+			} else {
+				$length = "";
+			}
+			$return[] = array("SPECIFIC_NAME" => $row["name"],
+							  "ROUTINE_NAME" => "{$row['user_name']}.{$row['name']}",
+							  "ROUTINE_TYPE" => $row["routine_type"] == 'SF' ? "FUNCTION" : "PROCEDURE",
+							  "DTD_IDENTIFIER" => $type . ($unsigned ? " UNSIGNED " : "") . ($length ? "($length)" : ""),
+							  );
+		}
+		return $return;
 	}
 
 	function routine_languages() {
@@ -1340,9 +1452,9 @@ ORDER BY colid2, colid") as $line) {
 						 //"move_col",
 						 //"partitioning",
 						 //"privileges",
-						 //"procedure",
+						 "procedure",
 						 "processlist",
-						 //"routine",
+						 "routine",
 						 //"scheme",
 						 //"sequence",
 						 "sql",
@@ -1393,7 +1505,7 @@ ORDER BY colid2, colid") as $line) {
 		}
 		return array(
 			'possible_drivers' => array("SYBASE", "PDO_DBLIB"),
-			'jush' => isset($_GET["trigger"]) ? "mssql" : "sybase",
+			'jush' => (isset($_GET["trigger"]) && $_POST) ? "mssql" : "sybase",
 			'types' => $types,
 			'structured_types' => $structured_types,
 			'unsigned' => array('unsigned'),
@@ -1423,7 +1535,7 @@ ORDER BY colid2, colid") as $line) {
 					}
 					$fields = fields($table);
 				}
-				$result = $connection->query($query, 1); // 1 - MYSQLI_USE_RESULT //! enum and set as numbers
+				$result = $connection->query($query, 1);
 				if ($result) {
 					$insert = "";
 					$buffer = "";
@@ -1511,4 +1623,3 @@ document.addEventListener('DOMContentLoaded', function() {
 	}
 
 }
-
