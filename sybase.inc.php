@@ -143,33 +143,28 @@ if (isset($_GET["sybase"])) {
 			}
 
 			function connect($server, $username, $password) {
-				$this->dsn("sybase:charset=utf8;host=" . str_replace(":", ";unix_socket=", preg_replace('~:(\d)~', ';port=\1', $server)), $username, $password);
+				$drivers = PDO::getAvailableDrivers();
+				if (in_array("dblib", $drivers)) {
+					$this->dsn("dblib:charset=utf8;host=" . str_replace(":", ";unix_socket=", preg_replace('~:(\d)~', ';port=\1', $server)), $username, $password);
+				} elseif (in_array("sybase", $drivers)) {
+					$this->dsn("sybase:charset=utf8;host=" . str_replace(":", ";unix_socket=", preg_replace('~:(\d)~', ';port=\1', $server)), $username, $password);
+				} else {
+					$this->error = "Could not find PDO driver";
+					return false;
+				}
+
 				return true;
 			}
 
 			function dsn($dsn, $username, $password, $options = array()) {
-				$options[PDO::ATTR_ERRMODE] = PDO::ERRMODE_SILENT;
-				$options[PDO::ATTR_STATEMENT_CLASS] = array('Min_PDOStatement');
-				try {
-					$this->pdo = new PDO($dsn, $username, $password, $options);
-				} catch (Exception $ex) {
-					$message = $ex->getMessage();
-					if ($message != "could not find driver") {
-						auth_error(h($message));
-					}
-					try {
-						list($driver, $dsn) = explode(":", $dsn, 2);
-						$this->pdo = new PDO("dblib:$dsn", $username, $password, $options);
-					} catch (Exception $ex) {
-						auth_error(h($ex->getMessage()));
-					}
-				}
+				$return = parent::dsn($dsn, $username, $password, $options);
 
 				$result = $this->query("SELECT @@VERSION");
 				if ($result) {
 					$row = $result->fetch_row();
 					$this->server_info = $row[0];
 				}
+				return $return;
 			}
 
 			function select_db($database) {
