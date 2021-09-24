@@ -43,6 +43,11 @@ if (isset($_GET["sybase"])) {
             }
 
             function query($query, $unbuffered = false) {
+                if ($this->_next_select) {
+                    $this->_next_select = false;
+                    return $this->_result;
+                }
+
                 $query = preg_replace("/;+\s*$/D", '', $query);
                 if (preg_match("/^.+--isql-go-command.*$/m", $query)) {
                     $query = preg_replace("/^.+--isql-go-command.*$/m", '', $query);
@@ -69,7 +74,70 @@ if (isset($_GET["sybase"])) {
                 return new Min_Result($result);
             }
 
-            function multi_query($query) {
+            function multi_query(&$query) {
+                if (preg_match_all("/^CALL\s+([^\s\(]+)\((.+)\)$/", $query, $matches, PREG_OFFSET_CAPTURE)) {
+                    $query = "EXEC " . $matches[1][0][0] . " " . $matches[2][0][0];
+                    $name = explode(".", $matches[1][0][0]);
+                    $procedure = preg_replace("/[\[\]]/", "", array_pop($name));
+                    $info = routine($procedure, "procedure");
+                    $fields = array();
+                    foreach ($info["fields"] as $field) {
+                        $fields[$field["field"]] = $field;
+                    }
+
+                    $outputs = array();
+                    if (preg_match_all("/(@@[^\s,\)]+)/",
+                                       $query, $matches, PREG_OFFSET_CAPTURE)) {
+                        $len = 0;
+                        foreach ($matches[1] as $match) {
+                            $outputs[] = substr($match[0], 1);
+                            $query = substr($query, 0, $match[1] + $len) . substr($match[0], 1) . " out" . substr($query, $match[1] + strlen($match[0]) + $len);
+                            $len += 3;
+                        }
+                    }
+
+                    $declare = null;
+                    foreach ($outputs as $out) {
+                        if (array_key_exists($out, $fields)) {
+                            $val = $out;
+                            if ($field["unsigned"]) {
+                                $val .= " unsigned";
+                            }
+                            $val .= " " . $field["type"];
+                            if ($field["length"]) {
+                                $val .= " (" . $field["length"] . ")";
+                            }
+                            if (is_null($declare)) {
+                                $declare = "DECLARE " . $val;
+                            } else {
+                                $declare .= ", " . $val;
+                            }
+                        }
+                    }
+                    if ($declare) {
+                        $declare .= "\nset proc_output_params off";
+                        $declare .= "\nset proc_return_status off";
+                        $query = $declare . "\n\n" .  $query;
+                    }
+                    $select = null;
+                    foreach ($outputs as $out) {
+                        if (array_key_exists($out, $fields)) {
+                            if (is_null($select)) {
+                                $select = "SELECT ";
+                            } else {
+                                $select .= ", ";
+                            }
+                            $select .= $out . " AS '" . substr($out, 1) . "'";
+                        }
+                    }
+                    if ($select) {
+                        $query = $query . "\n\n" .  $select;
+                        $result = $this->query($query);
+                        $this->_result = $this->query($query);
+                        $this->_next_select = true;
+                        return true;
+                    }
+                }
                 return $this->_result = $this->query($query);
             }
 
@@ -316,7 +384,7 @@ if (isset($_GET["sybase"])) {
         if (strpos($idf, ".") !== false) {
             $vals = explode(".", $idf);
             foreach ($vals as &$val) {
-                $val = "[" . str_replace("]", "]]", $val) . "]";
+                $val = idf_escape($val);
             }
             return implode(".", $vals);
         }
