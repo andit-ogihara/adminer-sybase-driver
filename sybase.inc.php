@@ -6,9 +6,10 @@ add_driver("sybase", "SYBASE");
 
 if (isset($_GET["sybase"])) {
     define("DRIVER", "sybase");
+    $_sybase_queries = array();
     if (extension_loaded("sybase_ct")) {
         class Min_DB {
-            var $extension = "SYBASE_CT", $_link, $_result, $server_info, $affected_rows, $error;
+            public $extension = "SYBASE_CT", $_link, $_result, $server_info, $affected_rows, $error;
 
             function __construct() {
                 $adminer = adminer();
@@ -43,6 +44,7 @@ if (isset($_GET["sybase"])) {
             }
 
             function query($query, $unbuffered = false) {
+                global $_sybase_queries;
                 if ($this->_next_select) {
                     $this->_next_select = false;
                     return $this->_result;
@@ -52,11 +54,13 @@ if (isset($_GET["sybase"])) {
                 if (preg_match("/^.+--isql-go-command.*$/m", $query)) {
                     $query = preg_replace("/^.+--isql-go-command.*$/m", '', $query);
                 }
+                $start_time = microtime(true);
                 if ($unbuffered) {
                     $result = @sybase_unbuffered_query($query, $this->_link);
                 } else {
                     $result = @sybase_query($query, $this->_link);
                 }
+                $_sybase_queries[] = array($query, microtime(true) - $start_time);
                 $this->error = "";
                 if (!$result) {
                     $this->error = sybase_get_last_message();
@@ -159,7 +163,8 @@ if (isset($_GET["sybase"])) {
         }
 
         class Min_Result {
-            var $_result, $_offset = 0, $_fields, $num_rows;
+            public $_result, $_offset = 0, $_fields, $num_rows;
+            public $_queries = array();
 
             function __construct($result) {
                 $this->_result = $result;
@@ -196,18 +201,18 @@ if (isset($_GET["sybase"])) {
 
     } elseif (extension_loaded("pdo_dblib")) {
         class Min_DB extends Min_PDO {
-            var $extension = "PDO_DBLIB";
+            public $extension = "PDO_DBLIB";
         
             function __construct() {
                 $adminer = adminer();
                 foreach ($adminer->plugins as $plugin) {
                     if (get_class($plugin) == 'AdminerSybaseDriver') {
+                        parent::__construct();
                         return;
                     }
                 }
                 adminer()->plugins[] = new AdminerSybaseDriver();
-
-                return parent::__construct();
+                parent::__construct();
             }
 
             function connect($server, $username, $password) {
@@ -239,13 +244,14 @@ if (isset($_GET["sybase"])) {
                 return $this->query("USE " . idf_escape($database));
             }
 
-
             function query($query, $unbuffered = false) {
                 $query = preg_replace("/;+\s*$/D", '', $query);
                 if (preg_match("/^.+--isql-go-command.*$/m", $query)) {
                     $query = preg_replace("/^.+--isql-go-command.*$/m", '', $query);
                 }
+                $start_time = microtime(true);
                 $result = parent::query($query, $unbuffered);
+                $_sybase_queries[] = array($query, microtime(true) - $start_time);
                 if ($result && preg_match('~/\* offset:(\d+) \*/~', $query, $matches)) {
                     for ($i = 0; $i < $matches[1]; $i++) {
                         $result->fetch(PDO::FETCH_NUM);
@@ -275,13 +281,13 @@ if (isset($_GET["sybase"])) {
                 case "money":
                     return;
                 case 'time':
-                    return "CASE WHEN $column IS NULL THEN NULL ELSE CONVERT(char(12), $columb, 20) END";
+                    return "CONVERT(char(12), $columb, 20)";
                 case 'date':
-                    return "CASE WHEN $column IS NULL THEN NULL ELSE CONVERT(char(10), $column, 111) END";
+                    return "CONVERT(char(10), $column, 111)";
                 case 'smalldatetime':
-                    return "CASE WHEN $column IS NULL THEN NULL ELSE CONVERT(char(10), $column, 111) + ' ' + CONVERT(char(5), $column, 18) END";
+                    return "NULLIF(CONVERT(char(10), $column, 111) + ' ' + CONVERT(char(5), $column, 18), ' ')";
                 case 'datetime':
-                    return "CASE WHEN $column IS NULL THEN NULL ELSE CONVERT(char(10), $column, 111) + ' ' + CONVERT(char(12), $column, 20) END";
+                    return "NULLIF(CONVERT(char(10), $column, 111) + ' ' + CONVERT(char(12), $column, 20), ' ')";
 
                 case "char":
                 case "varchar":
@@ -329,6 +335,15 @@ if (isset($_GET["sybase"])) {
             }
             return parent::select($table, $select2, $where, $group, $order, $limit, $page, $print);
         }
+
+        function insert($table, $set) {
+            if ($set) {
+                return queries("INSERT INTO " . table($table) . " (" . implode(", ", array_keys($set)) . ")\nVALUES (" . implode(", ", $set) . ")");
+            } else {
+                $this->_conn->error = "Can't insert";
+            }
+        }
+
         function insertUpdate($table, $rows, $primary) {
             $numbers = driver_config()['structured_types'][lang('Numbers')];
             $fields = fields($table);
@@ -834,37 +849,25 @@ ORDER BY colid2, colid") as $line) {
             $sql = "
 SELECT 
   fko.name AS fk_name,
-  pko.name AS pktable_name,
-  fk1.name AS fk1_name,
-  pk1.name AS pk1_name";
-            for ($i = 2; $i <= 16; $i++) {
+  pko.name AS pktable_name";
+            for ($i = 1; $i <= 16; $i++) {
                 $sql .= ",
-  fk{$i}.name AS fk{$i}_name,
-  pk{$i}.name AS pk{$i}_name";
+  CASE WHEN ref.fokey{$i} IS NOT NULL THEN col_name(ref.tableid, ref.fokey{$i}) ELSE NULL END AS fk{$i}_name,
+  CASE WHEN ref.refkey{$i} IS NOT NULL THEN col_name(ref.reftabid, ref.refkey{$i}) ELSE NULL END AS pk{$i}_name";
             }
             $sql .= "
-FROM sysobjects AS tab
-JOIN sysconstraints AS con ON tab.id = con.tableid
+FROM sysconstraints AS con
 JOIN sysobjects AS fko ON con.constrid = fko.id
 JOIN sysreferences AS ref ON con.constrid  = ref.constrid
 JOIN sysobjects AS pko ON pko.id = ref.reftabid
-JOIN syscolumns AS fk1 ON ref.fokey1 = fk1.colid AND ref.tableid = fk1.id
-JOIN syscolumns AS pk1 ON ref.refkey1 = pk1.colid AND ref.reftabid = pk1.id";
-            for ($i = 2; $i <= 16; $i++) {
-                $sql .= "
-LEFT JOIN syscolumns AS fk{$i} ON ref.fokey{$i} = fk{$i}.colid AND ref.tableid = fk{$i}.id
-LEFT JOIN syscolumns AS pk{$i} ON ref.refkey{$i} = pk{$i}.colid AND ref.reftabid = pk{$i}.id";
-            }
-            foreach (get_rows($sql . "\nWHERE tab.id = object_id(" . q($table) . ")") as $row) {
-                //$foreign_key["db"] = $row["fktable_qualifier"];
+WHERE con.tableid = object_id(" . q($table) . ")";
+            foreach (get_rows($sql) as $row) {
                 $foreign_key["table"] = $row["pktable_name"];
                 for ($i = 1; $i <= 16; $i++) {
                     if (is_null($row["fk{$i}_name"]) || $row["fk{$i}_name"] === "") break;
                     $foreign_key["source"][] = $row["fk{$i}_name"];
                     $foreign_key["target"][] = $row["pk{$i}_name"];
                 }
-                //$foreign_key["on_update"] = $row["update_rule"];
-                //$foreign_key["on_delete"] = $row["delete_rule"];
                 $name = $row["fk_name"];
                 $return[$name] = $foreign_key;
             }
@@ -1527,7 +1530,7 @@ ORDER BY so.name") as $row) {
                          //"type",
                          "variables",
                          "view",
-                         "view_trigger",
+                         //"view_trigger",
                          );
         return in_array($feature, $support);
     }
@@ -1573,8 +1576,8 @@ ORDER BY so.name") as $row) {
             'types' => $types,
             'structured_types' => $structured_types,
             'unsigned' => array('unsigned'),
-            'operators' => array("=", "<", ">", "<=", ">=", "!=", "LIKE", "LIKE %%", "IN", "IS NULL", "NOT LIKE", "NOT IN", "IS NOT NULL"),
-            'functions' => array("len", "lower", "round", "upper"),
+            'operators' => array("=", "<", ">", "<=", ">=", "<>", "!>", "!<", "BETWEEN", "LIKE", "LIKE %%", "IN", "IS NULL", "NOT LIKE", "NOT IN", "IS NOT NULL"),
+            'functions' => array("char_length", "len", "lower", "upper"),
             'grouping' => array("avg", "count", "count distinct", "max", "min", "sum"),
             'edit_functions' => array(
                 array(
@@ -1586,95 +1589,127 @@ ORDER BY so.name") as $row) {
             ),
         );
     }
+}
 
-    class AdminerSybaseDriver {
-        function dumpData($table, $style, $query) {
-            $connection = connection();
-            $jush = "sybase";
-            $max_packet = ($jush == "sqlite" ? 0 : 1048576); // default, minimum is 1024
-            if ($style) {
-                if ($_POST["format"] == "sql") {
-                    if ($style == "TRUNCATE+INSERT") {
-                        echo truncate_sql($table) . ";\n";
-                    }
-                    $fields = fields($table);
+class AdminerSybaseDriver {
+    private $_debug_sql = false;
+
+    function __construct($debug_sql=false) {
+        $this->_debug_sql = $debug_sql;
+    }
+
+    function dumpData($table, $style, $query) {
+        $connection = connection();
+        $jush = "sybase";
+        $max_packet = ($jush == "sqlite" ? 0 : 1048576); // default, minimum is 1024
+        if ($style) {
+            if ($_POST["format"] == "sql") {
+                if ($style == "TRUNCATE+INSERT") {
+                    echo truncate_sql($table) . ";\n";
                 }
-                $result = $connection->query($query, 1);
-                if ($result) {
-                    $insert = "";
-                    $buffer = "";
-                    $keys = array();
-                    $suffix = "";
-                    $fetch_function = ($table != '' ? 'fetch_assoc' : 'fetch_row');
-                    while ($row = $result->$fetch_function()) {
-                        if (!$keys) {
-                            $values = array();
-                            foreach ($row as $val) {
-                                $field = $result->fetch_field();
-                                $keys[] = $field->name;
-                                $key = idf_escape($field->name);
-                                $values[] = "$key = VALUES($key)";
-                            }
-                            $suffix = ($style == "INSERT+UPDATE" ? "\nON DUPLICATE KEY UPDATE " . implode(", ", $values) : "") . ";\n";
-                        }
-                        if ($_POST["format"] != "sql") {
-                            if ($style == "table") {
-                                dump_csv($keys);
-                                $style = "INSERT";
-                            }
-                            dump_csv($row);
-                        } else {
-                            if (!$insert) {
-                                $insert = "INSERT INTO " . table($table) . " (" . implode(", ", array_map('idf_escape', $keys)) . ") VALUES";
-                            }
-                            foreach ($row as $key => $val) {
-                                $field = $fields[$key];
-                                $row[$key] = ($val !== null
-                                              ? unconvert_field($field, preg_match(number_type(), $field["type"]) && !preg_match('~\[~', $field["full_type"]) && is_numeric($val) ? $val : q(($val === false ? 0 : $val)))
-                                              : "NULL"
-                                              );
-                            }
-                            $s = ($max_packet ? "\n" : " ") . "(" . implode(",\t", $row) . ")";
-                            /*
-                            if (!$buffer) {
-                                $buffer = $insert . $s;
-                            } elseif (strlen($buffer) + 4 + strlen($s) + strlen($suffix) < $max_packet) { // 4 - length specification
-                                $buffer .= ",$s";
-                            } else {
-                                echo $buffer . $suffix;
-                                $buffer = $insert . $s;
-                            }
-                            */
-                            echo $insert . $s . "\nGO --isql-go-command\n";
-                        }
-                    }
-                    if ($buffer) {
-                        echo $buffer . $suffix;
-                    }
-                } elseif ($_POST["format"] == "sql") {
-                    echo "-- " . str_replace("\n", " ", $connection->error) . "\n";
-                }
+                $fields = fields($table);
             }
-            return true;
-        }
+            $result = $connection->query($query, 1);
+            if ($result) {
+                $insert = "";
+                $buffer = "";
+                $keys = array();
+                $suffix = "";
+                $fetch_function = ($table != '' ? 'fetch_assoc' : 'fetch_row');
+                while ($row = $result->$fetch_function()) {
+                    if (!$keys) {
+                        $values = array();
+                        foreach ($row as $val) {
+                            $field = $result->fetch_field();
+                            $keys[] = $field->name;
+                            $key = idf_escape($field->name);
+                            $values[] = "$key = VALUES($key)";
+                        }
+                        $suffix = ($style == "INSERT+UPDATE" ? "\nON DUPLICATE KEY UPDATE " . implode(", ", $values) : "") . ";\n";
+                    }
+                    if ($_POST["format"] != "sql") {
+                        if ($style == "table") {
+                            dump_csv($keys);
+                            $style = "INSERT";
+                        }
+                        dump_csv($row);
+                    } else {
+                        if (!$insert) {
+                            $insert = "INSERT INTO " . table($table) . " (" . implode(", ", array_map('idf_escape', $keys)) . ") VALUES";
+                        }
+                        foreach ($row as $key => $val) {
+                            $field = $fields[$key];
+                            $row[$key] = ($val !== null
+                                          ? unconvert_field($field, preg_match(number_type(), $field["type"]) && !preg_match('~\[~', $field["full_type"]) && is_numeric($val) ? $val : q(($val === false ? 0 : $val)))
+                                          : "NULL"
+                            );
+                        }
+                        $s = ($max_packet ? "\n" : " ") . "(" . implode(",\t", $row) . ")";
 
-        function head() {
+                        /*
+                        if (!$buffer) {
+                            $buffer = $insert . $s;
+                        } elseif (strlen($buffer) + 4 + strlen($s) + strlen($suffix) < $max_packet) { // 4 - length specification
+                            $buffer .= ",$s";
+                        } else {
+                            echo $buffer . $suffix;
+                            $buffer = $insert . $s;
+                        }
+                        */
+                        echo $insert . $s . "\nGO --isql-go-command\n";
+                    }
+                }
+                if ($buffer) {
+                    echo $buffer . $suffix;
+                }
+            } elseif ($_POST["format"] == "sql") {
+                echo "-- " . str_replace("\n", " ", $connection->error) . "\n";
+            }
+        }
+        return true;
+    }
+
+    function __destruct() {
+        if (!$this->_debug_sql) return;
+
+        global $_sybase_queries;
+        $html = "";
+        foreach ($_sybase_queries as $val) {
+            $query = str_replace("\n", "<br>", $val[0]);
+            $sec = $val[1];
+            $html .= "<pre><span class=\"jush\">$query</span></pre><span class=\"time\">($sec 秒)</span>";
+        }
+?>
+<script <?php echo nonce(); ?>>
+document.addEventListener('DOMContentLoaded', function() {
+  var div = document.querySelector('div#content');
+  var msg = document.createElement('div');
+  msg.setAttribute('class', 'message');
+  msg.innerHTML = "Debug <a href=\"#debug_sql\" class=\"toggle\"><?php echo lang('SQL command'); ?></a><div id=\"debug_sql\" class=\"hidden\">" + <?php echo json_encode($html) ?> + "</div>";
+  div.appendChild(msg);
+  document.querySelector('a[href="#debug_sql"]').onclick = partial(toggle, 'debug_sql');
+});
+</script>
+<?php
+    }
+
+    function head() {
 ?>
 <script <?php echo nonce(); ?>>
 document.addEventListener('DOMContentLoaded', function() {
 <?php
-            // remove Alter indexes link
-            if (isset($_GET["table"])) {
+    // remove Alter indexes link
+    if (isset($_GET["table"])) {
 ?>
   document.querySelectorAll('h3#foreign-keys + table tr > :nth-child(3), h3#foreign-keys + table tr > :nth-child(4)').forEach(function(elm) {
     elm.style.display = 'none';
   });
 <?php
-            } elseif (isset($_GET["foreign"])) {
+    } elseif (isset($_GET["foreign"])) {
 ?>
   document.querySelector("select[name='on_delete']").closest('p').style.display = 'none';
 <?php
-            } elseif (isset($_GET["procedure"])) {
+    } elseif (isset($_GET["procedure"])) {
 ?>
   if (document.querySelector("form#form input[name='fields[1][field]']")) {
     for (var i = 1; true; i++) {
@@ -1739,16 +1774,14 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 <?php
-            }
+    }
 ?>
 
   if (document.querySelector('h3#tables-views')) {
-      document.querySelector('fieldset span#selected2').closest('fieldset').style.display = 'none';
+    document.querySelector('fieldset span#selected2').closest('fieldset').style.display = 'none';
   }
 });
 </script>
 <?php
-        }
     }
-
 }
