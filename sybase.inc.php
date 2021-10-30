@@ -3,7 +3,7 @@
 * @author Kazuhiro Ogihara
 */
 add_driver("sybase", "SYBASE");
-
+   
 if (isset($_GET["sybase"])) {
     define("DRIVER", "sybase");
     $_sybase_queries = array();
@@ -18,7 +18,7 @@ if (isset($_GET["sybase"])) {
                         return;
                     }
                 }
-                adminer()->plugins[] = new AdminerSybaseDriver();
+                adminer()->plugins[] = new AdminerSybaseDriver(true);
             }
 
             function connect($server, $username, $password) {
@@ -345,7 +345,8 @@ if (isset($_GET["sybase"])) {
         }
 
         function insertUpdate($table, $rows, $primary) {
-            $numbers = driver_config()['structured_types'][lang('Numbers')];
+            $config = driver_config();
+            $numbers = $config['structured_types'][lang('Numbers')];
             $fields = fields($table);
             foreach ($rows as $cols) {
                 $wheres = array();
@@ -962,9 +963,9 @@ ORDER BY colid2, colid") as $row) {
             return false;
         }
         foreach ($tables as $table) {
+			$vals = get_vals("SELECT object_id(" . q($new_table) . ")");
             $new_table = "copy_$table";
-            if ($_POST["overwrite"] &&
-                get_vals("SELECT object_id(" . q($new_table) . ")")[0]) {
+            if ($_POST["overwrite"] && $vals[0]) {
                 if (!queries("DROP TABLE " . table($new_table))) {
                     return false;
                 }
