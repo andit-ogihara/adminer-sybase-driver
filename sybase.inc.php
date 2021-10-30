@@ -3,7 +3,7 @@
 * @author Kazuhiro Ogihara
 */
 add_driver("sybase", "SYBASE");
-   
+
 if (isset($_GET["sybase"])) {
     define("DRIVER", "sybase");
     $_sybase_queries = array();
@@ -963,7 +963,7 @@ ORDER BY colid2, colid") as $row) {
             return false;
         }
         foreach ($tables as $table) {
-			$vals = get_vals("SELECT object_id(" . q($new_table) . ")");
+            $vals = get_vals("SELECT object_id(" . q($new_table) . ")");
             $new_table = "copy_$table";
             if ($_POST["overwrite"] && $vals[0]) {
                 if (!queries("DROP TABLE " . table($new_table))) {
