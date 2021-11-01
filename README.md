@@ -12,20 +12,11 @@ adminer-folder/
  - adminer.php
  - index.php
  - plugins/
-     - plugin.php
      - drivers/
          - sybase.inc.php
 ```
 
 Example of index.php:
 ```php
-function adminer_object() {
-    include_once "./plugins/drivers/sybase.inc.php";
-
-    // required to run any plugin
-    include_once "./plugins/plugin.php";
-    
-    return new AdminerPlugin($plugins);
-}
-// include original Adminer or Adminer Editor
+include_once "./plugins/drivers/sybase.inc.php";
 include "./adminer.php";
