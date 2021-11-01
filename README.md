@@ -14,7 +14,7 @@ adminer-folder/
  - plugins/
      - plugin.php
      - drivers/
-         - show-table-row.php
+         - sybase.inc.php
 ```
 
 Example of index.php:
