@@ -245,6 +245,7 @@ if (isset($_GET["sybase"])) {
             }
 
             function query($query, $unbuffered = false) {
+                global $_sybase_queries;
                 $query = preg_replace("/;+\s*$/D", '', $query);
                 if (preg_match("/^.+--isql-go-command.*$/m", $query)) {
                     $query = preg_replace("/^.+--isql-go-command.*$/m", '', $query);
