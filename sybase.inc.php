@@ -1595,6 +1595,7 @@ ORDER BY so.name") as $row) {
 
 class AdminerSybaseDriver {
     private $_debug_sql = false;
+    private $_output_html = false;
 
     function __construct($debug_sql=false) {
         $this->_debug_sql = $debug_sql;
@@ -1672,7 +1673,7 @@ class AdminerSybaseDriver {
     }
 
     function __destruct() {
-        if (!$this->_debug_sql) return;
+        if (!$this->_debug_sql || !$this->_output_html) return;
 
         global $_sybase_queries;
         $html = "";
@@ -1696,6 +1697,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function head() {
+        $this->_output_html = true;
 ?>
 <script <?php echo nonce(); ?>>
 document.addEventListener('DOMContentLoaded', function() {
