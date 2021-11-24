@@ -1399,7 +1399,7 @@ SELECT
   sc.status2
 FROM sysobjects AS so
 JOIN syscolumns AS sc ON sc.id = so.id
-JOIN systypes AS st ON st.type = sc.type
+JOIN systypes AS st ON st.type = sc.type AND st.usertype = sc.usertype
 WHERE so.type = '$type'
   AND so.name = '$name'
 ORDER BY sc.colid") as $row) {
